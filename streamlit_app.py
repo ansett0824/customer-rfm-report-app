@@ -98,13 +98,40 @@ def generate_customer_report(
     # =====================================
 
     def setup_chinese_font():
+        """
+        設定 Matplotlib 中文字型。
+        適用本機 Windows 與 Streamlit Cloud Linux 環境。
+
+        注意：
+        1. Windows 本機通常可使用 Microsoft JhengHei。
+        2. Streamlit Community Cloud 建議另外新增 packages.txt，
+           內容放：
+           fonts-noto-cjk
+           fonts-noto-cjk-extra
+        """
+
+        import matplotlib.pyplot as plt
+        import matplotlib.font_manager as fm
+
+        # 重新整理字型快取，避免雲端剛安裝字型後讀不到
+        try:
+            fm._load_fontmanager(try_read_cache=False)
+        except Exception:
+            pass
+
         candidate_fonts = [
             "Microsoft JhengHei",
+            "Microsoft YaHei",
             "PMingLiU",
             "DFKai-SB",
             "Noto Sans CJK TC",
+            "Noto Sans CJK JP",
+            "Noto Sans CJK SC",
+            "Noto Sans TC",
+            "Noto Sans CJK",
             "SimHei",
-            "Arial Unicode MS"
+            "Arial Unicode MS",
+            "DejaVu Sans"
         ]
 
         available_fonts = {f.name for f in fm.fontManager.ttflist}
@@ -112,12 +139,31 @@ def generate_customer_report(
         for font_name in candidate_fonts:
             if font_name in available_fonts:
                 plt.rcParams["font.family"] = font_name
+                plt.rcParams["font.sans-serif"] = [font_name]
                 plt.rcParams["axes.unicode_minus"] = False
-                print(f"已使用字型：{font_name}")
-                return
+                print(f"已使用中文字型：{font_name}")
+                return font_name
+
+        # 如果字型名稱抓不到，改用字型檔路徑搜尋 Noto CJK
+        for font in fm.fontManager.ttflist:
+            font_path = str(font.fname)
+            font_name = str(font.name)
+
+            if "NotoSansCJK" in font_path or "Noto Sans CJK" in font_name:
+                try:
+                    fm.fontManager.addfont(font_path)
+                except Exception:
+                    pass
+
+                plt.rcParams["font.family"] = font_name
+                plt.rcParams["font.sans-serif"] = [font_name]
+                plt.rcParams["axes.unicode_minus"] = False
+                print(f"已使用中文字型檔：{font_name}，路徑：{font_path}")
+                return font_name
 
         plt.rcParams["axes.unicode_minus"] = False
-        print("找不到指定中文字型，將使用系統預設字型。")
+        print("找不到中文字型，將使用系統預設字型，中文可能無法正確顯示。")
+        return None
 
 
     setup_chinese_font()
@@ -276,7 +322,6 @@ def generate_customer_report(
             suffixes=("", "_from_short")
         )
 
-        
         for col in ["聯絡人", "聯絡電話", "聯絡人手機"]:
             result[col] = result[f"{col}_from_short"].fillna("").astype(str).str.strip()
             result = result.drop(columns=[f"{col}_from_short"])
@@ -419,12 +464,13 @@ def generate_customer_report(
 
     def apply_monetary_gap_method(data, money_col="Monetary_raw"):
         """
-        Monetary 最大相鄰差額斷層法：
+        Monetary 改良式最大相鄰差額斷層法：
         1. 將所有客戶 Monetary 金額由小到大排序。
         2. 計算相鄰差額 = 目前金額 - 前一筆金額。
-        3. 找出最大相鄰差額的位置。
-        4. 採「斷層前一筆納入法」，將最大差額前一筆金額作為斷層門檻。
-        5. 本方法只做內部標註與報表上色，不做封頂、不改變 Monetary 金額、不影響 M 分數。
+        3. 計算相鄰差距比例 = 相鄰差額 ÷ 前一筆金額。
+        4. 只保留相鄰差距比例大於等於 vip_gap_ratio_threshold 的有效斷層。
+        5. 若有多個有效斷層，選擇相鄰差額最大的斷層作為 VIP 判定位置。
+        6. 採「斷層前一筆納入法」，將最大有效斷層的前一筆金額作為 VIP 門檻。
         """
 
         result = data.copy()
@@ -457,10 +503,12 @@ def generate_customer_report(
         gap_table["金額排序"] = np.arange(1, len(gap_table) + 1)
         gap_table["相鄰前一筆金額"] = gap_table[money_col].shift(1)
         gap_table["相鄰差額"] = gap_table[money_col] - gap_table["相鄰前一筆金額"]
+        gap_table["相鄰差距比例"] = gap_table["相鄰差額"] / gap_table["相鄰前一筆金額"]
 
         valid_gap_table = gap_table[
             (gap_table[money_col] > 0) &
-            (gap_table["相鄰前一筆金額"] > 0)
+            (gap_table["相鄰前一筆金額"] > 0) &
+            (gap_table["相鄰差距比例"] >= float(vip_gap_ratio_threshold))
         ].copy()
 
         if valid_gap_table.empty:
@@ -478,7 +526,7 @@ def generate_customer_report(
                 "max_gap_amount": np.nan,
                 "before_gap_amount": np.nan,
                 "after_gap_amount": np.nan,
-                "method_note": "有效資料無法計算相鄰差額，未進行斷層判定。"
+                "method_note": f"沒有找到相鄰差距比例達 {float(vip_gap_ratio_threshold):.0%} 以上的有效斷層，因此未進行 VIP 門檻判定。"
             }
 
             return result, gap_info, gap_table
@@ -490,10 +538,13 @@ def generate_customer_report(
         gap_threshold = before_gap_amount
         max_gap_amount = selected["相鄰差額"]
 
+        gap_ratio = max_gap_amount / before_gap_amount if before_gap_amount > 0 else np.nan
+
         method_note = (
-            f"已偵測到最大金額斷層：由 {before_gap_amount:,.0f} "
-            f"跳升至 {after_gap_amount:,.0f}，"
-            f"相鄰差額為 {max_gap_amount:,.0f}。"
+            f"已偵測到符合 {float(vip_gap_ratio_threshold):.0%} 條件之最大金額斷層："
+            f"由 {before_gap_amount:,.0f} 跳升至 {after_gap_amount:,.0f}，"
+            f"相鄰差額為 {max_gap_amount:,.0f}，"
+            f"相鄰差距比例為 {gap_ratio:.1%}。"
             f"本報表將 {before_gap_amount:,.0f} 以上客戶標註為 VIP 客戶。"
         )
 
@@ -531,6 +582,7 @@ def generate_customer_report(
             "max_gap_amount": max_gap_amount,
             "before_gap_amount": before_gap_amount,
             "after_gap_amount": after_gap_amount,
+            "gap_ratio": gap_ratio,
             "method_note": method_note
         }
 
@@ -540,7 +592,7 @@ def generate_customer_report(
     # 執行 Monetary 最大相鄰差額斷層法
     df, gap_info, gap_table = apply_monetary_gap_method(df, money_col="Monetary_raw")
 
-    print("\n=== Monetary 最大相鄰差額斷層法 ===")
+    print("\n=== Monetary 改良式最大相鄰差額斷層法 ===")
     print(gap_info["method_note"])
 
     if pd.notna(gap_info["gap_threshold"]):
@@ -556,7 +608,7 @@ def generate_customer_report(
     # 一般金額客戶：正式 M 分數採市面常用的五分位排名法，落在 1～5 分
     # VIP 高貢獻客戶：採倍率對數平滑法，讓 VIP 之間依金額差異逐步加分
     VIP_M_BASE_SCORE = 6
-    VIP_M_GROWTH_MULTIPLIER = 1.5
+    VIP_M_GROWTH_MULTIPLIER = float(vip_m_log_base)
 
     # 依斷層門檻建立 VIP 判斷欄位
     if pd.notna(gap_info.get("gap_threshold", np.nan)):
@@ -1064,7 +1116,7 @@ def generate_customer_report(
             label="VIP客戶"
         )
 
-    plt.title("Monetary 最大相鄰差額斷層法")
+    plt.title("Monetary 改良式最大相鄰差額斷層法")
     plt.xlabel("金額由小到大排序序號")
     plt.ylabel("分析期間合計銷售金額")
     plt.legend()
@@ -1636,7 +1688,7 @@ def generate_customer_report(
         ("圖2：各客群平均 RFM 分數比較", rfm_img, 720, 520),
         ("圖3：各客群平均銷售金額比較", money_img, 720, 520),
         ("圖4：各客群銷售貢獻度比較", contrib_img, 720, 520),
-        ("圖5：Monetary 最大相鄰差額斷層法", gap_img, 720, 520),
+        ("圖5：Monetary 改良式最大相鄰差額斷層法", gap_img, 720, 520),
     ]
 
     charts_per_row = 3
@@ -1982,57 +2034,274 @@ def generate_customer_report(
 st.set_page_config(
     page_title="客群分析報表產生器",
     page_icon="📊",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.title("📊 客群分析報表產生器")
-st.write("上傳銷貨資料 Excel，選擇分析月份後，即可自動產生 RFM + K-means 客群分析報表。")
+st.markdown(
+    """
+    <style>
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1180px;
+    }
+
+    .app-hero {
+        background: linear-gradient(135deg, #0f3d5e 0%, #1f6f8b 52%, #2f9e8f 100%);
+        padding: 30px 34px;
+        border-radius: 24px;
+        color: white;
+        box-shadow: 0 10px 28px rgba(15, 61, 94, 0.22);
+        margin-bottom: 22px;
+    }
+
+    .app-hero h1 {
+        margin: 0;
+        font-size: 34px;
+        font-weight: 800;
+        letter-spacing: 0.5px;
+    }
+
+    .app-hero p {
+        margin-top: 10px;
+        font-size: 17px;
+        line-height: 1.7;
+        opacity: 0.96;
+    }
+
+    .info-card {
+        background: #ffffff;
+        border: 1px solid #e6edf3;
+        border-radius: 18px;
+        padding: 18px 20px;
+        box-shadow: 0 4px 16px rgba(31, 78, 121, 0.08);
+        min-height: 138px;
+    }
+
+    .info-card h3 {
+        font-size: 18px;
+        margin: 0 0 8px 0;
+        color: #1f4e78;
+        font-weight: 800;
+    }
+
+    .info-card p {
+        font-size: 14px;
+        line-height: 1.65;
+        color: #4b5563;
+        margin: 0;
+    }
+
+    .section-title {
+        font-size: 22px;
+        font-weight: 800;
+        color: #1f4e78;
+        margin-top: 28px;
+        margin-bottom: 12px;
+    }
+
+    .small-note {
+        color: #6b7280;
+        font-size: 13px;
+        line-height: 1.6;
+    }
+
+    div.stButton > button:first-child {
+        height: 52px;
+        border-radius: 14px;
+        font-size: 17px;
+        font-weight: 800;
+    }
+
+    div[data-testid="stDownloadButton"] > button {
+        height: 52px;
+        border-radius: 14px;
+        font-size: 17px;
+        font-weight: 800;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    """
+    <div class="app-hero">
+        <h1>📊 客群分析報表產生器</h1>
+        <p>
+            上傳銷貨資料 Excel，選擇分析月份後，系統會自動完成
+            RFM 評分、VIP 斷層判定、K-means 分群、客戶追蹤清單與 Excel 報表輸出。
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+card1, card2, card3 = st.columns(3)
+with card1:
+    st.markdown(
+        """
+        <div class="info-card">
+            <h3>① 上傳資料</h3>
+            <p>上傳銷貨資料 Excel，客戶資料統計可選填。若有上傳，報表會自動帶入聯絡人、電話與手機。</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with card2:
+    st.markdown(
+        """
+        <div class="info-card">
+            <h3>② 設定月份與參數</h3>
+            <p>可自由選擇 1～12 月，也可調整 VIP 有效斷層比例與 VIP M 平滑對數底數。</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with card3:
+    st.markdown(
+        """
+        <div class="info-card">
+            <h3>③ 下載報表</h3>
+            <p>分析完成後，可直接下載 Excel 報表，內含摘要、評分規範、圖表總覽與客戶追蹤清單。</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+st.markdown('<div class="section-title">📁 上傳分析資料</div>', unsafe_allow_html=True)
+
+upload_col1, upload_col2 = st.columns(2)
+
+with upload_col1:
+    sales_file = st.file_uploader(
+        "上傳銷貨資料 Excel（必填）",
+        type=["xlsx"],
+        help="欄位至少需要包含：客戶、客戶簡稱、1月、2月、3月...等月份欄位。"
+    )
+
+with upload_col2:
+    customer_file = st.file_uploader(
+        "上傳客戶資料統計 Excel（選填）",
+        type=["xlsx"],
+        help="若上傳，程式會嘗試讀取聯絡人、聯絡電話、聯絡人手機。"
+    )
 
 with st.expander("📌 銷貨資料欄位格式說明", expanded=False):
-    st.write("銷貨資料至少需要包含：客戶、客戶簡稱、1月、2月、3月...等月份欄位。")
-    st.write("客戶資料統計為選填；若上傳，程式會嘗試帶入聯絡人、聯絡電話、聯絡人手機。")
+    st.markdown(
+        """
+        銷貨資料至少需要包含下列欄位：
 
-sales_file = st.file_uploader("上傳銷貨資料 Excel（必填）", type=["xlsx"])
-customer_file = st.file_uploader("上傳客戶資料統計 Excel（選填）", type=["xlsx"])
+        | 欄位名稱 | 說明 |
+        |---|---|
+        | 客戶 | 客戶代號或客戶編號 |
+        | 客戶簡稱 | 客戶顯示名稱 |
+        | 1月、2月、3月... | 每月銷售金額 |
 
-col1, col2, col3 = st.columns(3)
+        客戶資料統計為選填，若上傳，程式會嘗試帶入：聯絡人、聯絡電話、聯絡人手機。
+        """
+    )
 
-with col1:
+st.markdown('<div class="section-title">⚙️ 分析設定</div>', unsafe_allow_html=True)
+
+config_col1, config_col2, config_col3 = st.columns(3)
+
+with config_col1:
     analysis_months = st.multiselect(
         "選擇分析月份",
         options=list(range(1, 13)),
         default=[1, 2, 3],
-        format_func=lambda x: f"{x}月"
+        format_func=lambda x: f"{x}月",
+        help="例如只分析第一季就選 1～3 月；若是年度分析可選 1～12 月。"
     )
 
-with col2:
+with config_col2:
     vip_gap_ratio = st.number_input(
-        "VIP有效斷層比例",
+        "VIP 有效斷層比例",
         min_value=0.1,
         max_value=2.0,
         value=0.5,
         step=0.1,
-        help="0.5代表後一筆金額至少比前一筆高出50%，才視為有效斷層。"
+        help="0.5 代表後一筆金額至少比前一筆高出 50%，才視為有效斷層。"
     )
 
-with col3:
+with config_col3:
     vip_log_base = st.number_input(
-        "VIP M平滑對數底數",
+        "VIP M 平滑對數底數",
         min_value=1.1,
         max_value=10.0,
         value=2.5,
         step=0.1,
-        help="數值越大，VIP M平滑分數上升越慢。"
+        help="數值越大，VIP M 平滑分數上升越慢；數值越小，分數越容易拉開。"
     )
 
-if st.button("開始分析並產生報表", type="primary"):
+setting_preview = {
+    "分析月份": "、".join([f"{m}月" for m in sorted(analysis_months)]) if analysis_months else "尚未選擇",
+    "VIP有效斷層比例": f"{vip_gap_ratio:.1f}",
+    "VIP M平滑底數": f"{vip_log_base:.1f}",
+    "銷貨資料": sales_file.name if sales_file is not None else "尚未上傳",
+    "客戶資料": customer_file.name if customer_file is not None else "未上傳"
+}
+
+preview_col1, preview_col2 = st.columns([1.2, 1])
+with preview_col1:
+    st.markdown("#### 🔎 本次設定預覽")
+    st.dataframe(
+        pd.DataFrame(
+            list(setting_preview.items()),
+            columns=["項目", "內容"]
+        ),
+        use_container_width=True,
+        hide_index=True
+    )
+
+with preview_col2:
+    st.markdown("#### 🧾 報表內容")
+    st.markdown(
+        """
+        - 群組摘要
+        - RFM 評分規範
+        - 圖表總覽
+        - 客戶分群結果
+        - VIP 客戶維護清單
+        - 高價值客戶維護清單
+        - 一般客戶經營清單
+        - 流失風險客戶追蹤清單
+        """
+    )
+
+st.markdown('<div class="section-title">🚀 產生報表</div>', unsafe_allow_html=True)
+
+run_col1, run_col2 = st.columns([1, 2])
+
+with run_col1:
+    run_button = st.button("開始分析並產生報表", type="primary", use_container_width=True)
+
+with run_col2:
+    st.markdown(
+        '<p class="small-note">按下後系統會開始讀取 Excel、計算 RFM、進行 K-means 分群並產生報表。資料量較大時請稍候。</p>',
+        unsafe_allow_html=True
+    )
+
+if run_button:
     if sales_file is None:
         st.error("請先上傳銷貨資料 Excel。")
+
     elif len(analysis_months) == 0:
         st.error("請至少選擇一個分析月份。")
+
     else:
-        with st.spinner("報表產生中，請稍候..."):
-            try:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        try:
+            status_text.info("正在讀取資料並進行客群分析...")
+            progress_bar.progress(25)
+
+            with st.spinner("報表產生中，請稍候..."):
                 output_file = generate_customer_report(
                     sales_file=sales_file,
                     customer_info_file=customer_file,
@@ -2041,16 +2310,27 @@ if st.button("開始分析並產生報表", type="primary"):
                     vip_m_log_base=vip_log_base
                 )
 
-                st.success("報表產生完成！")
+            progress_bar.progress(85)
+            status_text.info("正在準備下載檔案...")
 
-                with open(output_file, "rb") as f:
-                    st.download_button(
-                        label="📥 下載客群分析結果報表",
-                        data=f,
-                        file_name=Path(output_file).name,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+            with open(output_file, "rb") as f:
+                report_bytes = f.read()
 
-            except Exception as e:
-                st.error("報表產生失敗，請檢查上傳檔案欄位格式是否正確。")
-                st.exception(e)
+            progress_bar.progress(100)
+            status_text.success("報表產生完成！")
+
+            st.download_button(
+                label="📥 下載客群分析結果報表",
+                data=report_bytes,
+                file_name=Path(output_file).name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+            st.success("已完成分析。下載後請開啟 Excel 檢查各工作表內容。")
+
+        except Exception as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.error("報表產生失敗，請檢查上傳檔案欄位格式是否正確。")
+            st.exception(e)
