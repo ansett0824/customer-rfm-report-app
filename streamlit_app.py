@@ -2035,7 +2035,7 @@ st.set_page_config(
     page_title="客群分析報表產生器",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 st.markdown(
@@ -2125,12 +2125,22 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+
+
+# =====================================
+# 系統預設設定
+# =====================================
+# 這兩個參數不顯示在前台，避免企業使用者操作過於複雜。
+DEFAULT_VIP_GAP_RATIO = 0.5
+DEFAULT_VIP_LOG_BASE = 2.5
+
+
 st.markdown(
     """
     <div class="app-hero">
         <h1>📊 客群分析報表產生器</h1>
         <p>
-            上傳銷貨資料 Excel，選擇分析月份後，系統會自動完成
+            上傳銷貨資料 Excel，選擇起始月份與結束月份後，系統會自動完成
             RFM 評分、VIP 斷層判定、K-means 分群、客戶追蹤清單與 Excel 報表輸出。
         </p>
     </div>
@@ -2143,8 +2153,8 @@ with card1:
     st.markdown(
         """
         <div class="info-card">
-            <h3>① 上傳資料</h3>
-            <p>上傳銷貨資料 Excel，客戶資料統計可選填。若有上傳，報表會自動帶入聯絡人、電話與手機。</p>
+            <h3>① 上傳銷貨資料</h3>
+            <p>上傳銷貨資料 Excel，欄位至少需包含客戶、客戶簡稱與月份金額欄位。</p>
         </div>
         """,
         unsafe_allow_html=True
@@ -2154,8 +2164,8 @@ with card2:
     st.markdown(
         """
         <div class="info-card">
-            <h3>② 設定月份與參數</h3>
-            <p>可自由選擇 1～12 月，也可調整 VIP 有效斷層比例與 VIP M 平滑對數底數。</p>
+            <h3>② 選擇分析期間</h3>
+            <p>使用起始月份與結束月份設定分析範圍，不需要逐一點選月份，操作更直覺。</p>
         </div>
         """,
         unsafe_allow_html=True
@@ -2165,30 +2175,38 @@ with card3:
     st.markdown(
         """
         <div class="info-card">
-            <h3>③ 下載報表</h3>
-            <p>分析完成後，可直接下載 Excel 報表，內含摘要、評分規範、圖表總覽與客戶追蹤清單。</p>
+            <h3>③ 下載分析報表</h3>
+            <p>分析完成後可直接下載 Excel，內含摘要、評分規範、圖表與客戶追蹤清單。</p>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-st.markdown('<div class="section-title">📁 上傳分析資料</div>', unsafe_allow_html=True)
+# =====================================
+# 上傳資料區
+# =====================================
 
-upload_col1, upload_col2 = st.columns(2)
+st.markdown("### 📂 資料上傳")
 
-with upload_col1:
-    sales_file = st.file_uploader(
-        "上傳銷貨資料 Excel（必填）",
-        type=["xlsx"],
-        help="欄位至少需要包含：客戶、客戶簡稱、1月、2月、3月...等月份欄位。"
-    )
+sales_file = st.file_uploader(
+    "上傳銷貨資料 Excel（必填）",
+    type=["xlsx"],
+    help="請上傳包含客戶、客戶簡稱、1月、2月、3月...等欄位的銷貨資料。"
+)
 
-with upload_col2:
-    customer_file = st.file_uploader(
-        "上傳客戶資料統計 Excel（選填）",
-        type=["xlsx"],
-        help="若上傳，程式會嘗試讀取聯絡人、聯絡電話、聯絡人手機。"
-    )
+customer_file = st.file_uploader(
+    "上傳客戶資料統計 Excel（選填）",
+    type=["xlsx"],
+    help="若上傳客戶資料統計檔，報表會嘗試帶入聯絡人、聯絡電話、聯絡人手機。"
+)
+
+if customer_file is not None:
+    customer_source_text = f"使用本次上傳的客戶資料：{customer_file.name}"
+    st.info("本次分析將使用你上傳的客戶資料統計檔，並嘗試帶入聯絡資訊。")
+else:
+    customer_source_text = "未使用客戶資料統計檔，報表不會帶入聯絡資訊"
+    st.info("本次未上傳客戶資料統計檔，報表中的聯絡資料欄位將保留空白。")
+
 
 with st.expander("📌 銷貨資料欄位格式說明", expanded=False):
     st.markdown(
@@ -2201,49 +2219,50 @@ with st.expander("📌 銷貨資料欄位格式說明", expanded=False):
         | 客戶簡稱 | 客戶顯示名稱 |
         | 1月、2月、3月... | 每月銷售金額 |
 
-        客戶資料統計為選填，若上傳，程式會嘗試帶入：聯絡人、聯絡電話、聯絡人手機。
+        客戶資料統計為選填。若使用者自行上傳客戶資料統計檔，程式會嘗試帶入：聯絡人、聯絡電話、聯絡人手機；若未上傳，報表中的聯絡資料欄位將保留空白。
         """
     )
 
+# =====================================
+# 分析設定區
+# =====================================
+
 st.markdown('<div class="section-title">⚙️ 分析設定</div>', unsafe_allow_html=True)
 
-config_col1, config_col2, config_col3 = st.columns(3)
+config_col1, config_col2 = st.columns(2)
 
 with config_col1:
-    analysis_months = st.multiselect(
-        "選擇分析月份",
+    start_month = st.selectbox(
+        "起始月份",
         options=list(range(1, 13)),
-        default=[1, 2, 3],
+        index=0,
         format_func=lambda x: f"{x}月",
-        help="例如只分析第一季就選 1～3 月；若是年度分析可選 1～12 月。"
+        help="請選擇分析期間的起始月份。"
     )
 
 with config_col2:
-    vip_gap_ratio = st.number_input(
-        "VIP 有效斷層比例",
-        min_value=0.1,
-        max_value=2.0,
-        value=0.5,
-        step=0.1,
-        help="0.5 代表後一筆金額至少比前一筆高出 50%，才視為有效斷層。"
+    end_month = st.selectbox(
+        "結束月份",
+        options=list(range(1, 13)),
+        index=2,
+        format_func=lambda x: f"{x}月",
+        help="請選擇分析期間的結束月份。"
     )
 
-with config_col3:
-    vip_log_base = st.number_input(
-        "VIP M 平滑對數底數",
-        min_value=1.1,
-        max_value=10.0,
-        value=2.5,
-        step=0.1,
-        help="數值越大，VIP M 平滑分數上升越慢；數值越小，分數越容易拉開。"
-    )
+if start_month > end_month:
+    analysis_months = []
+    st.error("起始月份不能大於結束月份，請重新選擇。")
+else:
+    analysis_months = list(range(start_month, end_month + 1))
+    st.success(f"本次分析月份：{start_month}月 ～ {end_month}月，共 {len(analysis_months)} 個月。")
 
+# 企業使用者不需要看到 VIP 斷層比例與平滑底數，因此這裡只在程式內固定使用。
+# 若未來管理者想調整，可直接修改 DEFAULT_VIP_GAP_RATIO 與 DEFAULT_VIP_LOG_BASE。
 setting_preview = {
-    "分析月份": "、".join([f"{m}月" for m in sorted(analysis_months)]) if analysis_months else "尚未選擇",
-    "VIP有效斷層比例": f"{vip_gap_ratio:.1f}",
-    "VIP M平滑底數": f"{vip_log_base:.1f}",
+    "分析月份": f"{start_month}月～{end_month}月" if analysis_months else "月份設定錯誤",
     "銷貨資料": sales_file.name if sales_file is not None else "尚未上傳",
-    "客戶資料": customer_file.name if customer_file is not None else "未上傳"
+    "客戶資料來源": customer_source_text,
+    "VIP 判定與平滑參數": "系統預設，前台不顯示"
 }
 
 preview_col1, preview_col2 = st.columns([1.2, 1])
@@ -2273,6 +2292,10 @@ with preview_col2:
         """
     )
 
+# =====================================
+# 產生報表區
+# =====================================
+
 st.markdown('<div class="section-title">🚀 產生報表</div>', unsafe_allow_html=True)
 
 run_col1, run_col2 = st.columns([1, 2])
@@ -2291,7 +2314,7 @@ if run_button:
         st.error("請先上傳銷貨資料 Excel。")
 
     elif len(analysis_months) == 0:
-        st.error("請至少選擇一個分析月份。")
+        st.error("請確認起始月份與結束月份設定正確。")
 
     else:
         progress_bar = st.progress(0)
@@ -2306,8 +2329,8 @@ if run_button:
                     sales_file=sales_file,
                     customer_info_file=customer_file,
                     analysis_months=analysis_months,
-                    vip_gap_ratio_threshold=vip_gap_ratio,
-                    vip_m_log_base=vip_log_base
+                    vip_gap_ratio_threshold=DEFAULT_VIP_GAP_RATIO,
+                    vip_m_log_base=DEFAULT_VIP_LOG_BASE
                 )
 
             progress_bar.progress(85)
