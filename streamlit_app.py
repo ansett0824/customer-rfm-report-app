@@ -276,6 +276,7 @@ def generate_customer_report(
             suffixes=("", "_from_short")
         )
 
+        
         for col in ["聯絡人", "聯絡電話", "聯絡人手機"]:
             result[col] = result[f"{col}_from_short"].fillna("").astype(str).str.strip()
             result = result.drop(columns=[f"{col}_from_short"])
