@@ -601,11 +601,11 @@ def generate_customer_report(
 
 
     # =====================================
-    # 3-2. M 分數計算：一般客戶五分位排名法 + VIP 倍率對數平滑法
+    # 3-2. M 分數計算：一般客戶金額等距五分法 + VIP 倍率對數平滑法
     # =====================================
 
     # 設定 VIP 平滑分數參數
-    # 一般金額客戶：正式 M 分數採市面常用的五分位排名法，落在 1～5 分
+    # 一般金額客戶：正式 M 分數採金額等距五分法，落在 1～5 分
     # VIP 高貢獻客戶：採倍率對數平滑法，讓 VIP 之間依金額差異逐步加分
     VIP_M_BASE_SCORE = 6
     VIP_M_GROWTH_MULTIPLIER = float(vip_m_log_base)
@@ -623,19 +623,19 @@ def generate_customer_report(
     # 預設分數
     # M_score：正式 M 分數
     # M_score_smooth：平滑分數，本版本主要用於 VIP 客戶；一般客戶則與正式 M 分數相同
-    # M_score_group：輔助欄位，保留五分位組別
+    # M_score_group：輔助欄位，保留分數組別
     df["M_score"] = 1
     df["M_score_smooth"] = 1.0
     df["M_score_group"] = 1
 
     # -------------------------------------------------
-    # 一般金額客戶：五分位排名法（市面常用 RFM Monetary 評分方式）
+    # 一般金額客戶：金額等距五分法
     # -------------------------------------------------
     # 設計邏輯：
     # 1. 只針對非 VIP 且有正向銷售金額的客戶計算。
-    # 2. 將一般客戶依 Monetary_raw 由小到大排名。
-    # 3. 依排名平均切成 5 組，分別給 1～5 分。
-    # 4. 使用 rank(method="average")，相同金額會取得相同平均排名。
+    # 2. 找出一般客戶中的最低金額與最高金額。
+    # 3. 用「最高金額 - 最低金額」除以 5，得到每一級的金額區間寬度。
+    # 4. 依照客戶 Monetary_raw 落在哪個金額區間，給予 1～5 分。
     # 5. 一般客戶不額外使用平滑小數；M_score_smooth 與正式 M_score 相同。
     normal_money_mask = (
         (df["是否VIP金額"] == "否") &
@@ -645,15 +645,34 @@ def generate_customer_report(
     normal_money = df.loc[normal_money_mask, "Monetary_raw"]
 
     if len(normal_money) > 1:
-        # 市面常用五分位排名法：依累積金額排名切成五等分
-        normal_rank = normal_money.rank(method="average", ascending=True)
-        normal_count = len(normal_money)
+        normal_min_money = normal_money.min()
+        normal_max_money = normal_money.max()
 
-        normal_group = (
-            np.ceil(normal_rank / normal_count * 5)
-            .astype(int)
-            .clip(1, 5)
-        )
+        # 每一級的金額區間寬度
+        normal_step = (normal_max_money - normal_min_money) / 5
+
+        def calc_equal_width_m_score(amount):
+            """
+            一般客戶 M 分數：金額等距五分法。
+            第1級：最低金額 ～ 最低金額 + 1個區間
+            第2級：最低金額 + 1個區間 ～ 最低金額 + 2個區間
+            第3級：最低金額 + 2個區間 ～ 最低金額 + 3個區間
+            第4級：最低金額 + 3個區間 ～ 最低金額 + 4個區間
+            第5級：最低金額 + 4個區間 ～ 最高金額
+            """
+            if normal_step <= 0:
+                return 3
+
+            if amount <= normal_min_money:
+                return 1
+
+            if amount >= normal_max_money:
+                return 5
+
+            score = int((amount - normal_min_money) // normal_step) + 1
+            return max(1, min(5, score))
+
+        normal_group = normal_money.apply(calc_equal_width_m_score).astype(int)
 
         df.loc[normal_money_mask, "M_score"] = normal_group
         df.loc[normal_money_mask, "M_score_smooth"] = normal_group.astype(float)
@@ -742,7 +761,7 @@ def generate_customer_report(
     ).round(2)
 
     # 金額加權平滑總分：
-    # 一般客戶使用五分位 M 分數，VIP 客戶使用平滑 M 分數
+    # 一般客戶使用金額等距五分法 M 分數，VIP 客戶使用平滑 M 分數
     M_WEIGHT = 2
 
     df["RFM_money_weighted_total"] = (
@@ -1341,9 +1360,9 @@ def generate_customer_report(
         ],
         [
             "M分數 Monetary",
-            "一般客戶採五分位排名法；VIP客戶採倍率對數平滑法",
+            "一般客戶採金額等距五分法；VIP客戶採倍率對數平滑法",
             "一般客戶1～5分；VIP客戶6分以上",
-            "一般金額客戶採市面常用的五分位排名法，先計算分析期間累積銷售金額，再依金額由小到大排序，依排名平均切成五組並給予1～5分。一般客戶不額外使用平滑小數，M平滑分數與正式M分數相同；VIP客戶則以VIP門檻為基準，採倍率對數平滑法計算6分以上之M平滑分數，正式M分數由M平滑分數四捨五入取得。"
+            "一般金額客戶先計算分析期間累積銷售金額，並找出一般客戶中的最低金額與最高金額，再以（最高金額－最低金額）÷5 作為每一級的金額區間寬度，依客戶金額落點給予1～5分。一般客戶不額外使用平滑小數，M平滑分數與正式M分數相同；VIP客戶則以VIP門檻為基準，採倍率對數平滑法計算6分以上之M平滑分數，正式M分數由M平滑分數四捨五入取得。"
         ],
         [
             "RFM總分",
@@ -1528,12 +1547,12 @@ def generate_customer_report(
 
     def build_normal_m_score_range_rows(normal_df):
         """
-        產生一般客戶 M 分數 1～5 分的實際金額範圍說明。
+        產生一般客戶 M 分數 1～5 分的金額等距判定表。
         說明：
-        1. 一般客戶 M 分數採市面常用五分位排名法。
-        2. 先依分析期間累積銷售金額由小到大排序。
-        3. 再依排名平均切成五組，分別給 1～5 分。
-        4. 表列金額範圍為本次資料中該分數組的實際最低～最高金額。
+        1. 一般客戶 M 分數採金額等距五分法。
+        2. 先找出一般客戶的最低金額與最高金額。
+        3. 以（最高金額－最低金額）÷5，計算每一級的金額區間寬度。
+        4. 依客戶 Monetary_raw 落在哪個區間，給予 1～5 分。
         """
         rows = []
 
@@ -1546,34 +1565,55 @@ def generate_customer_report(
         if temp.empty:
             return rows
 
-        temp = temp.sort_values("Monetary_raw", ascending=True).copy()
-        temp["_M_rank_order"] = np.arange(1, len(temp) + 1)
+        min_money = temp["Monetary_raw"].min()
+        max_money = temp["Monetary_raw"].max()
+        step = (max_money - min_money) / 5
 
-        normal_count = len(temp)
+        # 如果所有金額都一樣，無法切分五個區間
+        if step <= 0:
+            rows.append([
+                "一般金額客戶",
+                format_money_range(min_money, max_money),
+                "3分",
+                "本次一般客戶金額皆相同，無法依（最高金額－最低金額）÷5切分，因此統一給予中間分數3分。"
+            ])
+            return rows
 
         for score in range(1, 6):
-            group_df = temp[temp["M_score"] == score].copy()
+            lower = min_money + (score - 1) * step
+            upper = min_money + score * step
 
-            if group_df.empty:
-                range_text = "本次無客戶"
+            # 第5級強制包含最高金額，避免最高值因邊界問題沒有被納入
+            if score == 5:
+                group_df = temp[
+                    (temp["Monetary_raw"] >= lower) &
+                    (temp["Monetary_raw"] <= max_money)
+                ].copy()
+                range_text = f"{lower:,.0f} ～ {max_money:,.0f}"
+            else:
+                group_df = temp[
+                    (temp["Monetary_raw"] >= lower) &
+                    (temp["Monetary_raw"] < upper)
+                ].copy()
+                range_text = f"{lower:,.0f} ～ {upper:,.0f}"
+
+            group_count = len(group_df)
+
+            if group_count == 0:
                 desc_text = (
-                    f"公式：M分數＝向上取整（金額排名 ÷ {normal_count} × 5）。"
-                    f"本次資料中沒有客戶落在 M={score} 分。"
+                    f"公式：區間寬度＝（最高金額 {max_money:,.0f}－最低金額 {min_money:,.0f}）÷5 "
+                    f"＝ {step:,.0f}。本區間沒有客戶落入。"
                 )
             else:
-                min_amount = group_df["Monetary_raw"].min()
-                max_amount = group_df["Monetary_raw"].max()
-                group_count = len(group_df)
-
-                rank_min = int(group_df["_M_rank_order"].min())
-                rank_max = int(group_df["_M_rank_order"].max())
-
-                range_text = format_money_range(min_amount, max_amount)
+                actual_min = group_df["Monetary_raw"].min()
+                actual_max = group_df["Monetary_raw"].max()
 
                 desc_text = (
-                    f"公式：M分數＝向上取整（金額排名 ÷ {normal_count} × 5）。"
-                    f"本組為第{rank_min}～{rank_max}名，共{group_count}位；"
-                    f"表列金額為本次資料中該組實際最低～最高金額，並非固定連續門檻。"
+                    f"公式：區間寬度＝（最高金額 {max_money:,.0f}－最低金額 {min_money:,.0f}）÷5 "
+                    f"＝ {step:,.0f}。"
+                    f"本組理論區間為 {range_text}，"
+                    f"本次實際落入客戶共{group_count}位，"
+                    f"實際金額範圍為 {actual_min:,.0f} ～ {actual_max:,.0f}。"
                 )
 
             rows.append([
@@ -1608,7 +1648,7 @@ def generate_customer_report(
             "一般金額客戶",
             "本次無一般金額客戶",
             "無",
-            "本次無一般金額客戶可計算五分位排名法 M 分數。"
+            "本次無一般金額客戶可計算金額等距五分法 M 分數。"
         ]
 
         for col_idx, value in enumerate(normal_row_data, start=1):
@@ -2025,7 +2065,7 @@ def generate_customer_report(
                 pass
 
     return output_file
-#
+
 
 # =====================================
 # Streamlit 網頁介面
@@ -2138,7 +2178,7 @@ DEFAULT_VIP_LOG_BASE = 2.5
 st.markdown(
     """
     <div class="app-hero">
-        <h1>📊 客群分析報表</h1>
+        <h1>📊 客群分析報表｜金額等距五分法版</h1>
         <p>
             上傳銷貨資料 Excel，選擇起始月份與結束月份後，系統會自動完成
             RFM 評分、VIP 斷層判定、K-means 分群、客戶追蹤清單與 Excel 報表輸出。
