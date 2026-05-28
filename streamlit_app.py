@@ -2032,7 +2032,7 @@ def generate_customer_report(
 # =====================================
 
 st.set_page_config(
-    page_title="客群分析報表產生器",
+    page_title="客群分析報表",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed"
