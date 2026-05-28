@@ -2138,7 +2138,7 @@ DEFAULT_VIP_LOG_BASE = 2.5
 st.markdown(
     """
     <div class="app-hero">
-        <h1>📊 客群分析報表產生器</h1>
+        <h1>📊 客群分析報表</h1>
         <p>
             上傳銷貨資料 Excel，選擇起始月份與結束月份後，系統會自動完成
             RFM 評分、VIP 斷層判定、K-means 分群、客戶追蹤清單與 Excel 報表輸出。
